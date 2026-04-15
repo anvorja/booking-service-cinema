@@ -159,6 +159,50 @@ async def _fetch_showtime(movie_id: int, showtime_id: int) -> dict:
     )
 
 
+async def _derive_showtime_id(
+    movie_id: int,
+    show_date: date_type,
+    show_time: str,
+) -> int | None:
+    """
+    Consulta el catálogo para encontrar el showtime_id que coincide con
+    movie_id + show_date + show_time.  Útil como fallback cuando el cliente
+    no envió showtime_id (e.g., por pérdida de estado de navegación).
+    Retorna None si no se encuentra o si el catálogo no está disponible.
+    """
+    url = f"{settings.CATALOG_SERVICE_URL}/api/v1/movies/{movie_id}/showtimes"
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(url, params={
+                "start_date": show_date.isoformat(),
+                "end_date": show_date.isoformat(),
+            })
+        if resp.status_code != 200:
+            return None
+        showtimes = resp.json()
+        matched = next(
+            (st for st in showtimes if st.get("show_time") == show_time),
+            None,
+        )
+        if matched:
+            derived_id = matched.get("id")
+            logger.info(
+                "showtime_id auto-derivado | movie_id=%s show_date=%s show_time=%s → showtime_id=%s",
+                movie_id, show_date, show_time, derived_id,
+            )
+            return derived_id
+        logger.warning(
+            "No se pudo auto-derivar showtime_id | movie_id=%s show_date=%s show_time=%s — "
+            "showtimes disponibles: %s",
+            movie_id, show_date, show_time,
+            [(st.get("id"), st.get("show_time")) for st in showtimes],
+        )
+        return None
+    except Exception as exc:
+        logger.warning("Error en auto-derivación de showtime_id: %s", exc)
+        return None
+
+
 async def create_purchase(db: Session, user_id: int, purchase_data: PurchaseCreate) -> Purchase:
     """
     Crea una compra en estado PENDING y deja el contexto de pago
@@ -179,10 +223,20 @@ async def create_purchase(db: Session, user_id: int, purchase_data: PurchaseCrea
     if not movie:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Movie not found or not available")
 
+    # Resolver showtime_id: usar el que envió el cliente o derivarlo del catálogo
+    # cuando el cliente no lo envió pero sí tiene show_date + show_time.
+    effective_showtime_id: int | None = purchase_data.showtime_id
+    if not effective_showtime_id and purchase_data.show_date and purchase_data.show_time:
+        effective_showtime_id = await _derive_showtime_id(
+            purchase_data.movie_id,
+            purchase_data.show_date,
+            purchase_data.show_time,
+        )
+
     # Si se especifica un showtime, validar disponibilidad a nivel de función
     showtime_data: dict | None = None
-    if purchase_data.showtime_id:
-        showtime_data = await _fetch_showtime(purchase_data.movie_id, purchase_data.showtime_id)
+    if effective_showtime_id:
+        showtime_data = await _fetch_showtime(purchase_data.movie_id, effective_showtime_id)
         showtime_available = showtime_data.get("available_tickets", 0)
         if showtime_available < purchase_data.quantity:
             raise HTTPException(
@@ -207,7 +261,7 @@ async def create_purchase(db: Session, user_id: int, purchase_data: PurchaseCrea
     # IMPORTANTE: esto debe ocurrir ANTES de crear la compra en DB para que el order_id no
     # quede persistido si los holds fallan. Usamos un order_id temporal basado en user+time
     # y luego los confirmamos con el order_id real tras el flush.
-    if purchase_data.selected_seats and purchase_data.showtime_id:
+    if purchase_data.selected_seats and effective_showtime_id:
         # Pre-validación: consultamos el mapa y adquirimos holds con order_id=0 (placeholder)
         # Los holds se reasignarán al order_id real si la DB confirma la compra.
         # Para atomicidad práctica usamos un ID temporal negativo que no puede chocar.
@@ -215,7 +269,7 @@ async def create_purchase(db: Session, user_id: int, purchase_data: PurchaseCrea
         _tmp_order_id = -(int(_time.time() * 1000) % 2**30)
         await _validate_and_hold_seats(
             purchase_data.movie_id,
-            purchase_data.showtime_id,
+            effective_showtime_id,
             _tmp_order_id,
             purchase_data.selected_seats,
         )
@@ -253,16 +307,16 @@ async def create_purchase(db: Session, user_id: int, purchase_data: PurchaseCrea
             payment_info=stored_payment_info,
             show_date=resolved_show_date,
             show_time=resolved_show_time,
-            showtime_id=purchase_data.showtime_id,
+            showtime_id=effective_showtime_id,
         )
         db.add(purchase)
         db.flush()
 
         # Reasignar holds al order_id real — usa SET atómico (sin soltar la clave)
         # para evitar la ventana de carrera que existía entre release_seat + hold_seat.
-        if purchase_data.selected_seats and purchase_data.showtime_id and _tmp_order_id is not None:
+        if purchase_data.selected_seats and effective_showtime_id and _tmp_order_id is not None:
             for code in purchase_data.selected_seats:
-                reassign_hold(purchase_data.showtime_id, code, purchase.id)
+                reassign_hold(effective_showtime_id, code, purchase.id)
 
         _store_pending_payment_context(
             order_id=purchase.id,
@@ -281,6 +335,7 @@ async def create_purchase(db: Session, user_id: int, purchase_data: PurchaseCrea
             resolved_theater_name=resolved_theater_name,
             resolved_theater_location=resolved_theater_location,
             resolved_show_format=resolved_show_format,
+            effective_showtime_id=effective_showtime_id,
         )
         db.commit()
         db.refresh(purchase)
@@ -290,15 +345,15 @@ async def create_purchase(db: Session, user_id: int, purchase_data: PurchaseCrea
         db.rollback()
         _delete_pending_payment_context(purchase.id if "purchase" in locals() else None)
         # Liberar holds si la DB falló después de haberlos reasignado
-        if purchase_data.selected_seats and purchase_data.showtime_id:
-            release_seats_for_order(purchase_data.showtime_id, purchase_data.selected_seats)
+        if purchase_data.selected_seats and effective_showtime_id:
+            release_seats_for_order(effective_showtime_id, purchase_data.selected_seats)
         raise
     except Exception as e:
         db.rollback()
         _delete_pending_payment_context(purchase.id if "purchase" in locals() else None)
         # Liberar holds si la DB falló
-        if purchase_data.selected_seats and purchase_data.showtime_id:
-            release_seats_for_order(purchase_data.showtime_id, purchase_data.selected_seats)
+        if purchase_data.selected_seats and effective_showtime_id:
+            release_seats_for_order(effective_showtime_id, purchase_data.selected_seats)
         logger.error("DB error creating purchase: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -375,6 +430,7 @@ def _store_pending_payment_context(
     resolved_theater_name: str | None = None,
     resolved_theater_location: str | None = None,
     resolved_show_format: str | None = None,
+    effective_showtime_id: int | None = None,
 ) -> None:
     client = redis_client._get_client()
     if client is None:
@@ -433,7 +489,7 @@ def _store_pending_payment_context(
                 else resolved_show_date
             ),
             "show_time": resolved_show_time,
-            "showtime_id": purchase_data.showtime_id,
+            "showtime_id": effective_showtime_id if effective_showtime_id is not None else purchase_data.showtime_id,
             "theater_name": resolved_theater_name,
             "theater_location": resolved_theater_location,
             "show_format": resolved_show_format,
