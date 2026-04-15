@@ -186,9 +186,12 @@ async def get_occupied_seats(
     1. Tickets cuyo showtime_id coincide directamente.
     2. Tickets cuya compra tiene ese showtime_id (cubre el caso en que el ticket se
        creó sin showtime_id pero la compra sí lo tiene).
-    3. Fallback para datos históricos sin showtime_id: si se pasan movie_id + show_date
-       + show_time, también se incluyen tickets de compras confirmadas que coincidan
-       por esos tres campos (compras antiguas donde showtime_id era null).
+    3a. Fallback para datos históricos sin showtime_id: si se pasan movie_id + show_date
+        + show_time, también se incluyen tickets de compras confirmadas que coincidan
+        por esos tres campos (compras antiguas donde showtime_id era null).
+    3b. Fallback adicional: compras donde show_time también es NULL pero coinciden en
+        movie_id + show_date (cubre el caso en que el frontend no envió show_time,
+        e.g. cuando el objeto showtime no tenía campo time).
     """
     occupied: set[str] = set()
 
@@ -208,22 +211,33 @@ async def get_occupied_seats(
     )
     occupied.update(row[0] for row in rows)
 
-    # ── 3: Fallback para compras históricas con showtime_id = NULL ───────────
-    if movie_id and show_date and show_time:
-        fallback_rows = (
+    if movie_id and show_date:
+        base_filters = [
+            Purchase.showtime_id.is_(None),
+            Purchase.movie_id == movie_id,
+            Purchase.show_date == show_date,
+            Ticket.status.in_([TicketStatus.ACTIVE, TicketStatus.USED]),
+            Purchase.status == PurchaseStatus.CONFIRMED,
+        ]
+
+        # ── 3a: Fallback con show_time exacto ───────────────────────────────
+        if show_time:
+            fallback_rows = (
+                db.query(Ticket.seat_number)
+                .join(Purchase, Ticket.purchase_id == Purchase.id)
+                .filter(*base_filters, Purchase.show_time == show_time)
+                .all()
+            )
+            occupied.update(row[0] for row in fallback_rows)
+
+        # ── 3b: Fallback para compras donde show_time también es NULL ────────
+        null_time_rows = (
             db.query(Ticket.seat_number)
             .join(Purchase, Ticket.purchase_id == Purchase.id)
-            .filter(
-                Purchase.showtime_id.is_(None),
-                Purchase.movie_id == movie_id,
-                Purchase.show_date == show_date,
-                Purchase.show_time == show_time,
-                Ticket.status.in_([TicketStatus.ACTIVE, TicketStatus.USED]),
-                Purchase.status == PurchaseStatus.CONFIRMED,
-            )
+            .filter(*base_filters, Purchase.show_time.is_(None))
             .all()
         )
-        occupied.update(row[0] for row in fallback_rows)
+        occupied.update(row[0] for row in null_time_rows)
 
     return {"showtime_id": showtime_id, "seats": list(occupied)}
 
