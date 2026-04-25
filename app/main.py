@@ -78,6 +78,13 @@ async def lifespan(_app: FastAPI):
     logger.info("Alembic: running upgrade head")
     alembic_command.upgrade(_alembic_cfg, 'head')
 
+    if not settings.KAFKA_ENABLED:
+        logger.warning(
+            "KAFKA_ENABLED=false — Kafka producer and consumer are DISABLED. "
+            "Purchases will be created but the saga (inventory → payment → confirm) "
+            "will NEVER run. Set KAFKA_ENABLED=true in Render env vars."
+        )
+
     await start_producer()
 
     from app.kafka.consumer import start_consumer

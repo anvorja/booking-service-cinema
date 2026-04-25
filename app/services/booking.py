@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core import redis_client, circuit_breaker
-from app.core.redis_client import hold_seat, release_seat, reassign_hold, release_seats_for_order
+from app.core.redis_client import hold_seat, release_seat, reassign_hold, release_seats_for_order, inventory_was_reserved
 from app.kafka.producer import publish_event as _publish_kafka_event
 from app.models.movie import Movie
 from app.models.purchase import Purchase, Ticket, PurchaseStatus, TicketStatus
@@ -840,12 +840,25 @@ async def reconcile_pending_purchases(db_factory) -> None:
         last_attempt_at = _parse_iso_datetime(context.get("last_attempt_at"))
 
         if payment_status == "pending_inventory" and created_at_utc < inventory_timeout_before:
-            await mark_purchase_cancelled(
-                db_factory,
-                order_id=purchase.id,
-                reason="No llegó una decisión de inventario a tiempo.",
-                release_inventory=False,
-            )
+            # Before cancelling, check if inventory-service already reserved stock for this
+            # order (its Lua script set inv:reservation:order:N in the shared Redis) but
+            # booking's consumer missed the inventory.reserved Kafka event (e.g. it restarted
+            # with auto_offset_reset=latest while the event was in-flight).
+            if inventory_was_reserved(purchase.id):
+                logger.info(
+                    "Reconciler: inventory was already reserved but event was missed — "
+                    "triggering payment directly | order_id=%s",
+                    purchase.id,
+                )
+                await trigger_payment_for_order(db_factory, purchase.id)
+            else:
+                await mark_purchase_cancelled(
+                    db_factory,
+                    order_id=purchase.id,
+                    reason="No llegó una decisión de inventario a tiempo.",
+                    # Inventory never reserved → nothing to release
+                    release_inventory=False,
+                )
             continue
 
         if state == "payment_retry":

@@ -92,6 +92,23 @@ def release_seat(showtime_id: int, seat_code: str) -> None:
         logger.error("release_seat error | showtime_id=%s seat=%s | %s", showtime_id, seat_code, exc)
 
 
+def inventory_was_reserved(order_id: int) -> bool:
+    """
+    Returns True if inventory-service already created a reservation for this order in Redis.
+    Used by the reconciler to recover orders where the inventory.reserved Kafka event was
+    published but the booking consumer missed it (e.g. consumer restarted with offset=latest).
+    Both services share the same Redis instance; key format mirrors inventory-service.
+    """
+    client = _get_client()
+    if client is None:
+        return False
+    try:
+        return client.exists(f"inv:reservation:order:{order_id}") == 1
+    except Exception as exc:
+        logger.error("inventory_was_reserved check error | order_id=%s | %s", order_id, exc)
+        return False
+
+
 def release_seats_for_order(showtime_id: int, seat_codes: List[str]) -> None:
     """Elimina todos los holds de un order en un pipeline Redis."""
     if not seat_codes:

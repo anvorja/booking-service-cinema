@@ -272,8 +272,10 @@ async def _run_consumer(db_factory) -> None:
         sasl_plain_password=settings.KAFKA_API_SECRET,
         ssl_context=ssl_context,
         group_id="booking-service-group",
-        # En topics operativos no debemos reejecutar backlog histórico al arrancar.
-        auto_offset_reset="latest",
+        # "earliest" garantiza que si el consumer se reinicia antes de hacer commit
+        # del offset (p.ej. durante un cold-start), no pierde mensajes ya publicados.
+        # Todos los handlers son idempotentes, así que reprocesar es seguro.
+        auto_offset_reset="earliest",
         enable_auto_commit=False,
         value_deserializer=lambda v: json.loads(v.decode("utf-8")),
     )

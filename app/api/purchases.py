@@ -1,5 +1,6 @@
 # app/api/purchases.py
 import asyncio
+import logging
 from datetime import datetime, date as date_type, time as time_type, timedelta
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -14,6 +15,8 @@ from app.models.purchase import Purchase, PurchaseStatus, Ticket, TicketStatus
 from app.models.user import User
 from app.schemas.purchase import PurchaseCreate, PurchaseResponse, PurchaseListResponse, TicketResponse
 from app.services.booking import create_purchase as svc_create_purchase, call_refund_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/purchases", tags=["purchases"])
 
@@ -44,8 +47,16 @@ async def create_purchase_endpoint(
         "showtime_id": purchase.showtime_id,
     }
 
-    # Publicar en background — no bloquea la respuesta HTTP
-    asyncio.create_task(publish_event("order.created", order_created_payload))
+    # Publicar de forma directa (no fire-and-forget) para detectar fallos de Kafka
+    # inmediatamente. Si falla, la compra quedó en PENDING y el reconciler la cancela
+    # en 120s, pero al menos el error queda visible en los logs.
+    try:
+        await publish_event("order.created", order_created_payload)
+    except Exception as kafka_exc:
+        logger.error(
+            "order.created publish failed for purchase_id=%s — saga will NOT start: %s",
+            purchase.id, kafka_exc,
+        )
 
     return PurchaseResponse.from_orm(purchase)
 
