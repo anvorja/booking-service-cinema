@@ -182,6 +182,33 @@ async def cancel_purchase(
     return response
 
 
+@router.get("/internal/movies/{movie_id}/used-ticket")
+async def check_user_used_ticket(
+    movie_id: int,
+    user_email: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    """
+    Endpoint interno para catalog-service.
+    Retorna si el usuario tiene al menos un ticket USED para la película dada,
+    lo que indica que asistió a alguna función (QR escaneado).
+    No requiere autenticación — debe protegerse a nivel de red (Traefik/VPC).
+    """
+    from app.models.user import User as UserModel
+    has_used = (
+        db.query(Ticket)
+        .join(Purchase, Ticket.purchase_id == Purchase.id)
+        .join(UserModel, Purchase.user_id == UserModel.id)
+        .filter(
+            Purchase.movie_id == movie_id,
+            UserModel.email == user_email,
+            Ticket.status == TicketStatus.USED,
+        )
+        .first()
+    ) is not None
+    return {"has_used_ticket": has_used}
+
+
 @router.get("/showtimes/{showtime_id}/occupied-seats")
 async def get_occupied_seats(
     showtime_id: int,
