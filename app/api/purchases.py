@@ -190,23 +190,26 @@ async def check_user_used_ticket(
 ):
     """
     Endpoint interno para catalog-service.
-    Retorna si el usuario tiene al menos un ticket USED para la película dada,
-    lo que indica que asistió a alguna función (QR escaneado).
+    Retorna si el usuario tiene al menos un ticket USED para la película dada
+    (QR escaneado) y su primer nombre para mostrarlo en las reseñas.
     No requiere autenticación — debe protegerse a nivel de red (Traefik/VPC).
     """
     from app.models.user import User as UserModel
+    user = db.query(UserModel).filter(UserModel.email == user_email).first()
     has_used = (
         db.query(Ticket)
         .join(Purchase, Ticket.purchase_id == Purchase.id)
-        .join(UserModel, Purchase.user_id == UserModel.id)
         .filter(
             Purchase.movie_id == movie_id,
-            UserModel.email == user_email,
+            Purchase.user_id == user.id if user else False,
             Ticket.status == TicketStatus.USED,
         )
         .first()
-    ) is not None
-    return {"has_used_ticket": has_used}
+    ) is not None if user else False
+    return {
+        "has_used_ticket": has_used,
+        "first_name": user.first_name if user else None,
+    }
 
 
 @router.get("/showtimes/{showtime_id}/occupied-seats")
