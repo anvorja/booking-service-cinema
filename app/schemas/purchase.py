@@ -4,7 +4,7 @@ from datetime import datetime, date
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field, model_validator
 
-_SEAT_CODE_RE = re.compile(r"^[A-Z]\d{1,2}$")
+_SEAT_CODE_RE = re.compile(r"^[A-Z]\d{1,3}$")
 
 
 class PaymentInfo(BaseModel):
@@ -20,7 +20,7 @@ class PseInfo(BaseModel):
     bank_name: str
     document_type: str = Field(..., pattern=r"^(CC|CE|NIT|PP|TI)$")
     document_number: str = Field(..., min_length=4, max_length=20)
-    payer_email: str
+    payer_email: str = Field(..., pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class PurchaseCreate(BaseModel):
@@ -29,8 +29,8 @@ class PurchaseCreate(BaseModel):
     payment_info: Optional[PaymentInfo] = None
     pse_info: Optional[PseInfo] = None
     show_date: Optional[date] = None
-    show_time: Optional[str] = None
-    showtime_id: Optional[int] = None
+    show_time: Optional[str] = Field(None, pattern=r"^([0-1]?\d|2[0-3]):[0-5]\d$")
+    showtime_id: Optional[int] = Field(None, gt=0)
     selected_seats: Optional[List[str]] = None  # ej. ["A1", "B3", "C7"]
 
     @model_validator(mode='after')
@@ -50,7 +50,7 @@ class PurchaseCreate(BaseModel):
             if invalid:
                 raise ValueError(
                     f'Códigos de asiento inválidos: {invalid}. '
-                    'El formato debe ser una letra mayúscula seguida de 1 o 2 dígitos (ej. A1, J10).'
+                    'El formato debe ser una letra mayúscula seguida de 1 a 3 dígitos (ej. A1, J10, K125).'
                 )
             # Validar unicidad
             if len(set(self.selected_seats)) != len(self.selected_seats):
