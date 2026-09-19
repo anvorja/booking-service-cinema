@@ -95,6 +95,7 @@ completa de restauración/migración de la BD:
 | `CATALOG_SERVICE_URL` | Para validar showtimes al crear una compra |
 | `PAYMENT_RETRY_INTERVAL_SECONDS`, `PAYMENT_MAX_INIT_ATTEMPTS`, `PAYMENT_FLOW_STALE_SECONDS`, `INVENTORY_DECISION_TIMEOUT_SECONDS` | Tuning del reconciler |
 | `REDIS_URL` | Contexto de pago en curso, circuit breaker, y blacklist de JWT compartida con `auth-service` |
+| `INTERNAL_SERVICE_TOKEN` | Header `X-Internal-Token` que exigen las rutas `/internal/*` (usadas por `catalog-service` y `user-service`) — debe coincidir con el mismo valor allá |
 
 ## Dependencias
 

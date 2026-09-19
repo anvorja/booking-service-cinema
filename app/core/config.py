@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     # Redis — shared blacklist with auth-service (key: blacklist:<sha256>)
     REDIS_URL: str = ""
 
+    # Secreto compartido para autenticar llamadas servicio-a-servicio a
+    # rutas /internal/* (Traefik no filtra esas rutas, y en producción cada
+    # servicio de Render es alcanzable por su URL pública sin pasar por
+    # Traefik — ver ARCHITECTURE.md, "Aislamiento de base de datos por
+    # servicio"). Debe coincidir con el mismo valor en catalog-service y
+    # user-service (quienes llaman a estas rutas).
+    INTERNAL_SERVICE_TOKEN: str = ""
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

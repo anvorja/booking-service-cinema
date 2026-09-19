@@ -1,5 +1,5 @@
 # app/api/dependencies.py
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
@@ -10,6 +10,15 @@ from app.core import redis_client
 from app.models.user import User
 
 security = HTTPBearer()
+
+
+async def verify_internal_token(x_internal_token: str = Header(None)) -> None:
+    """
+    Guard para rutas /internal/* consumidas por otros microservicios
+    (no por el usuario final). Ver INTERNAL_SERVICE_TOKEN en config.py.
+    """
+    if not settings.INTERNAL_SERVICE_TOKEN or x_internal_token != settings.INTERNAL_SERVICE_TOKEN:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid internal token")
 
 
 async def get_current_user(

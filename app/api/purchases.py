@@ -8,7 +8,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.database import get_db
-from app.api.dependencies import get_current_user
+from app.api.dependencies import get_current_user, verify_internal_token
 from app.kafka.producer import publish_event
 from app.models.movie import Movie
 from app.models.purchase import Purchase, PurchaseStatus, Ticket, TicketStatus
@@ -188,7 +188,7 @@ async def cancel_purchase(
     return response
 
 
-@router.get("/internal/movies/{movie_id}/used-ticket")
+@router.get("/internal/movies/{movie_id}/used-ticket", dependencies=[Depends(verify_internal_token)])
 async def check_user_used_ticket(
     movie_id: int,
     user_email: str = Query(...),
@@ -198,7 +198,9 @@ async def check_user_used_ticket(
     Endpoint interno para catalog-service.
     Retorna si el usuario tiene al menos un ticket USED para la película dada
     (QR escaneado) y su primer nombre para mostrarlo en las reseñas.
-    No requiere autenticación — debe protegerse a nivel de red (Traefik/VPC).
+    Protegido por X-Internal-Token (ver verify_internal_token) — no por JWT
+    de usuario, ni por "nivel de red" (eso no existe realmente: Traefik no
+    filtra /internal/*, y en Render cada servicio tiene su propia URL pública).
     """
     from app.models.user import User as UserModel
     user = db.query(UserModel).filter(UserModel.email == user_email).first()
@@ -218,7 +220,11 @@ async def check_user_used_ticket(
     }
 
 
-@router.get("/internal/users/{user_id}/purchases", response_model=List[InternalUserPurchaseResponse])
+@router.get(
+    "/internal/users/{user_id}/purchases",
+    response_model=List[InternalUserPurchaseResponse],
+    dependencies=[Depends(verify_internal_token)],
+)
 async def get_user_purchases_internal(
     user_id: int,
     skip: int = Query(default=0, ge=0),
@@ -228,12 +234,11 @@ async def get_user_purchases_internal(
 ):
     """
     Endpoint interno para user-service (GET /api/v1/users/me/purchases).
-    user-service ya validó el JWT y filtra por su propio user_id — no
-    requiere autenticación aquí, debe protegerse a nivel de red
-    (Traefik/VPC), igual que /internal/movies/{movie_id}/used-ticket.
-    Reemplaza la lectura directa que user-service hacía antes contra
-    cinema_booking (ver ARCHITECTURE.md, "Aislamiento de base de datos
-    por servicio").
+    user-service ya validó el JWT y filtra por su propio user_id; esta ruta
+    la protege X-Internal-Token (ver verify_internal_token), no JWT de
+    usuario. Reemplaza la lectura directa que user-service hacía antes
+    contra cinema_booking (ver ARCHITECTURE.md, "Aislamiento de base de
+    datos por servicio").
     """
     q = (
         db.query(Purchase)
