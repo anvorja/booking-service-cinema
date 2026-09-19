@@ -4,8 +4,8 @@ import logging
 from datetime import datetime, date as date_type, time as time_type, timedelta
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import or_
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import or_, func, case
+from sqlalchemy.orm import Session, selectinload, joinedload
 
 from app.core.database import get_db
 from app.api.dependencies import get_current_user, verify_internal_token
@@ -19,6 +19,10 @@ from app.schemas.purchase import (
     PurchaseListResponse,
     TicketResponse,
     InternalUserPurchaseResponse,
+    InternalAdminPurchaseResponse,
+    SalesReport,
+    MovieSalesReport,
+    DateSalesReport,
 )
 from app.services.booking import create_purchase as svc_create_purchase, call_refund_service
 
@@ -249,6 +253,152 @@ async def get_user_purchases_internal(
         q = q.filter(Purchase.status == purchase_status)
     purchases = q.order_by(Purchase.id.desc()).offset(skip).limit(limit).all()
     return [InternalUserPurchaseResponse.from_orm(p) for p in purchases]
+
+
+# ── Internas, para admin-service (panel de compras y reportes de ventas) ──────
+# Reemplazan la lectura/escritura directa que admin-service hacía antes
+# contra cinema_booking. Ver ARCHITECTURE.md, "Aislamiento de base de datos
+# por servicio", caso 3.
+
+@router.get(
+    "/internal/admin/purchases",
+    response_model=List[InternalAdminPurchaseResponse],
+    dependencies=[Depends(verify_internal_token)],
+)
+async def list_purchases_internal(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    movie_id: Optional[int] = Query(None),
+    user_id: Optional[int] = Query(None),
+    purchase_status: Optional[str] = Query(None, alias="status"),
+    db: Session = Depends(get_db),
+):
+    q = db.query(Purchase).options(
+        joinedload(Purchase.movie),
+        joinedload(Purchase.user),
+        joinedload(Purchase.tickets),
+    )
+    if movie_id:
+        q = q.filter(Purchase.movie_id == movie_id)
+    if user_id:
+        q = q.filter(Purchase.user_id == user_id)
+    if purchase_status:
+        q = q.filter(Purchase.status == purchase_status.lower())
+    purchases = q.order_by(Purchase.created_at.desc()).offset(skip).limit(limit).all()
+    return [InternalAdminPurchaseResponse.from_orm(p) for p in purchases]
+
+
+@router.get(
+    "/internal/admin/reports/sales",
+    response_model=SalesReport,
+    dependencies=[Depends(verify_internal_token)],
+)
+async def sales_report_internal(db: Session = Depends(get_db)):
+    total_purchases = db.query(Purchase).filter(Purchase.status == PurchaseStatus.CONFIRMED).count()
+    total_revenue = db.query(func.sum(Purchase.total_amount)).filter(
+        Purchase.status == PurchaseStatus.CONFIRMED
+    ).scalar() or 0
+    total_tickets = db.query(func.sum(Purchase.quantity)).filter(
+        Purchase.status == PurchaseStatus.CONFIRMED
+    ).scalar() or 0
+    total_refunds = db.query(Purchase).filter(Purchase.status == PurchaseStatus.REFUNDED).count()
+    total_refunded_amount = db.query(func.sum(Purchase.total_amount)).filter(
+        Purchase.status == PurchaseStatus.REFUNDED
+    ).scalar() or 0
+    total_cancelled = db.query(Purchase).filter(Purchase.status == PurchaseStatus.CANCELLED).count()
+    avg = total_revenue / total_purchases if total_purchases > 0 else 0
+
+    return SalesReport(
+        total_purchases=total_purchases,
+        total_revenue=float(total_revenue),
+        total_tickets_sold=int(total_tickets),
+        average_purchase_amount=round(avg, 2),
+        total_refunds=total_refunds,
+        total_refunded_amount=float(total_refunded_amount),
+        total_cancelled=total_cancelled,
+        currency="COP",
+    )
+
+
+@router.get(
+    "/internal/admin/reports/by-movie",
+    response_model=MovieSalesReport,
+    dependencies=[Depends(verify_internal_token)],
+)
+async def report_by_movie_internal(db: Session = Depends(get_db)):
+    rows = (
+        db.query(
+            Movie.id.label("movie_id"),
+            Movie.title.label("movie_title"),
+            func.count(Purchase.id).label("purchases_count"),
+            func.sum(Purchase.quantity).label("tickets_sold"),
+            func.sum(
+                case((Purchase.status == PurchaseStatus.CONFIRMED, Purchase.total_amount), else_=0)
+            ).label("revenue"),
+            func.sum(
+                case((Purchase.status == PurchaseStatus.REFUNDED, Purchase.total_amount), else_=0)
+            ).label("refunded_amount"),
+        )
+        .join(Movie, Purchase.movie_id == Movie.id)
+        .filter(Purchase.status.in_([PurchaseStatus.CONFIRMED, PurchaseStatus.REFUNDED]))
+        .group_by(Movie.id, Movie.title)
+        .order_by(
+            func.sum(
+                case((Purchase.status == PurchaseStatus.CONFIRMED, Purchase.total_amount), else_=0)
+            ).desc()
+        )
+        .all()
+    )
+    items = []
+    for r in rows:
+        revenue = float(r.revenue or 0)
+        refunded = float(r.refunded_amount or 0)
+        items.append({
+            "movie_id": r.movie_id,
+            "movie_title": r.movie_title,
+            "purchases_count": r.purchases_count or 0,
+            "tickets_sold": int(r.tickets_sold or 0),
+            "revenue": revenue,
+            "refunded_amount": refunded,
+            "net_revenue": revenue - refunded,
+        })
+    return MovieSalesReport(items=items, currency="COP")
+
+
+@router.get(
+    "/internal/admin/reports/by-date",
+    response_model=DateSalesReport,
+    dependencies=[Depends(verify_internal_token)],
+)
+async def report_by_date_internal(
+    period: str = Query("daily", pattern="^(daily|weekly|monthly)$"),
+    db: Session = Depends(get_db),
+):
+    trunc_map = {"daily": "day", "weekly": "week", "monthly": "month"}
+    trunc = trunc_map.get(period, "day")
+
+    rows = (
+        db.query(
+            func.date_trunc(trunc, Purchase.created_at).label("period"),
+            func.count(Purchase.id).label("purchases_count"),
+            func.sum(Purchase.quantity).label("tickets_sold"),
+            func.sum(Purchase.total_amount).label("revenue"),
+        )
+        .filter(Purchase.status == PurchaseStatus.CONFIRMED)
+        .group_by(func.date_trunc(trunc, Purchase.created_at))
+        .order_by(func.date_trunc(trunc, Purchase.created_at))
+        .all()
+    )
+    items = [
+        {
+            "period": r.period.isoformat() if r.period else "",
+            "purchases_count": r.purchases_count or 0,
+            "tickets_sold": int(r.tickets_sold or 0),
+            "revenue": float(r.revenue or 0),
+        }
+        for r in rows
+    ]
+    return DateSalesReport(items=items, period_type=period, currency="COP")
 
 
 @router.get("/showtimes/{showtime_id}/occupied-seats")

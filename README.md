@@ -28,8 +28,12 @@ FastAPI + SQLAlchemy 2.0 + Alembic, Postgres, `aiokafka`, `httpx`, puerto
 | `POST` | `/api/v1/purchases/{id}/cancel` | Reembolsa una compra `CONFIRMED` (bloquea si falta <30 min para la función) |
 | `POST` | `/api/v1/purchases/tickets/{ticket_code}/validate` | Valida un boleto en sala (rol `admin`/`scanner`); detecta y anula boletos duplicados por doble venta |
 | `GET` | `/api/v1/purchases/showtimes/{id}/occupied-seats` | Asientos ocupados de una función, con fallback para datos históricos sin `showtime_id` |
-| `GET` | `/api/v1/purchases/internal/movies/{id}/used-ticket` | Interno, sin auth — usado por `catalog-service` para reseñas |
-| `GET` | `/api/v1/purchases/internal/users/{user_id}/purchases` | Interno, sin auth — usado por `user-service` para `GET /api/v1/users/me/purchases` (ver `../ARCHITECTURE.md`, "Aislamiento de base de datos por servicio") |
+| `GET` | `/api/v1/purchases/internal/movies/{id}/used-ticket` | Interno, protegido por `X-Internal-Token` — usado por `catalog-service` para reseñas |
+| `GET` | `/api/v1/purchases/internal/users/{user_id}/purchases` | Interno, protegido por `X-Internal-Token` — usado por `user-service` para `GET /api/v1/users/me/purchases` (ver `../ARCHITECTURE.md`, "Aislamiento de base de datos por servicio", caso 4) |
+| `GET` | `/api/v1/purchases/internal/admin/purchases` | Interno, protegido por `X-Internal-Token` — usado por `admin-service` para `/admin/purchases*` (caso 3) |
+| `GET` | `/api/v1/purchases/internal/admin/reports/sales` | Interno, protegido por `X-Internal-Token` — usado por `admin-service` para `/admin/reports/sales` (caso 3) |
+| `GET` | `/api/v1/purchases/internal/admin/reports/by-movie` | Interno, protegido por `X-Internal-Token` — usado por `admin-service` para `/admin/reports/by-movie` (caso 3) |
+| `GET` | `/api/v1/purchases/internal/admin/reports/by-date` | Interno, protegido por `X-Internal-Token` — usado por `admin-service` para `/admin/reports/by-date` (caso 3) |
 | `GET` | `/health` | Estado del servicio + si el consumer de Kafka y el reconciler siguen vivos |
 
 ## Eventos Kafka
@@ -95,7 +99,7 @@ completa de restauración/migración de la BD:
 | `CATALOG_SERVICE_URL` | Para validar showtimes al crear una compra |
 | `PAYMENT_RETRY_INTERVAL_SECONDS`, `PAYMENT_MAX_INIT_ATTEMPTS`, `PAYMENT_FLOW_STALE_SECONDS`, `INVENTORY_DECISION_TIMEOUT_SECONDS` | Tuning del reconciler |
 | `REDIS_URL` | Contexto de pago en curso, circuit breaker, y blacklist de JWT compartida con `auth-service` |
-| `INTERNAL_SERVICE_TOKEN` | Header `X-Internal-Token` que exigen las rutas `/internal/*` (usadas por `catalog-service` y `user-service`) — debe coincidir con el mismo valor allá |
+| `INTERNAL_SERVICE_TOKEN` | Header `X-Internal-Token` que exigen las rutas `/internal/*` (usadas por `catalog-service`, `user-service` y `admin-service`) — debe coincidir con el mismo valor allá |
 
 ## Dependencias
 

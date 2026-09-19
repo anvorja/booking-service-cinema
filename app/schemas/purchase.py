@@ -215,3 +215,102 @@ class InternalUserPurchaseResponse(BaseModel):
             show_date=purchase.show_date,
             show_time=purchase.show_time,
         )
+
+
+# ── Contrato interno para admin-service (panel de compras y reportes) ──────────
+# admin-service ya no lee/escribe cinema_booking directamente (ver
+# ARCHITECTURE.md, "Aislamiento de base de datos por servicio", caso 3).
+# Estos schemas son un espejo deliberado de los de
+# admin-service-cinema/app/schemas/admin.py — cualquier cambio de forma acá
+# debe reflejarse allá.
+
+class InternalAdminUserInfo(BaseModel):
+    id: int
+    first_name: str
+    last_name: str
+    email: str
+
+
+class InternalAdminMovieInfo(BaseModel):
+    id: int
+    title: str
+    genre: str
+
+
+class InternalAdminPurchaseResponse(BaseModel):
+    id: int
+    user_id: int
+    movie_id: int
+    movie_title: str
+    user_full_name: str
+    user: InternalAdminUserInfo
+    movie: InternalAdminMovieInfo
+    quantity: int
+    total_amount: float
+    status: str
+    is_confirmed: bool
+    created_at: datetime
+    tickets: List[TicketResponse]
+    payment_summary: Dict[str, Any]
+
+    @classmethod
+    def from_orm(cls, p):
+        return cls(
+            id=p.id, user_id=p.user_id, movie_id=p.movie_id,
+            movie_title=p.movie.title, user_full_name=p.user.full_name,
+            user=InternalAdminUserInfo(
+                id=p.user.id, first_name=p.user.first_name,
+                last_name=p.user.last_name, email=p.user.email,
+            ),
+            movie=InternalAdminMovieInfo(
+                id=p.movie.id, title=p.movie.title, genre=p.movie.genre,
+            ),
+            quantity=p.quantity, total_amount=p.total_amount,
+            status=p.status.value, is_confirmed=p.is_confirmed,
+            created_at=p.created_at,
+            tickets=[TicketResponse.from_orm(t) for t in p.tickets],
+            payment_summary={
+                "last_four": p.payment_info.get("last_four", "****") if p.payment_info else "****",
+                "total_amount": p.total_amount,
+                "currency": "COP",
+            },
+        )
+
+
+class SalesReport(BaseModel):
+    total_purchases: int
+    total_revenue: float
+    total_tickets_sold: int
+    average_purchase_amount: float
+    total_refunds: int
+    total_refunded_amount: float
+    total_cancelled: int
+    currency: str
+
+
+class MovieSalesItem(BaseModel):
+    movie_id: int
+    movie_title: str
+    purchases_count: int
+    tickets_sold: int
+    revenue: float
+    refunded_amount: float
+    net_revenue: float
+
+
+class MovieSalesReport(BaseModel):
+    items: List[MovieSalesItem]
+    currency: str
+
+
+class DateSalesItem(BaseModel):
+    period: str
+    purchases_count: int
+    tickets_sold: int
+    revenue: float
+
+
+class DateSalesReport(BaseModel):
+    items: List[DateSalesItem]
+    period_type: str
+    currency: str
