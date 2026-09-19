@@ -22,7 +22,10 @@ from app.schemas.purchase import PurchaseCreate
 
 _PENDING_PAYMENT_TTL_SECONDS = 15 * 60
 _PENDING_PAYMENT_PREFIX = "booking:pending-payment:"
-_PAYMENT_IN_FLIGHT_GUARD_SECONDS = 20
+# Debe quedar por debajo de PAYMENT_RETRY_INTERVAL_SECONDS pero con margen —
+# es la última defensa contra el reconciliador disparando dos intentos casi
+# a la vez si su propio loop (que duerme ese mismo intervalo) tiene jitter.
+_PAYMENT_IN_FLIGHT_GUARD_SECONDS = 50
 
 logger = logging.getLogger(__name__)
 
