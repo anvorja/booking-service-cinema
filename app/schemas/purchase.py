@@ -145,3 +145,73 @@ class PurchaseListResponse(BaseModel):
             created_at=purchase.created_at,
             tickets_count=len(purchase.tickets),
         )
+
+
+# ── Contrato interno para user-service (GET /internal/users/{user_id}/purchases) ──
+# user-service ya no lee cinema_booking directamente (ver ARCHITECTURE.md,
+# "Aislamiento de base de datos por servicio"). Este schema es un espejo
+# deliberado de MyPurchaseResponse en user-service-cinema/app/schemas/user.py —
+# cualquier cambio de forma acá debe reflejarse allá.
+
+class InternalMovieInfo(BaseModel):
+    id: int
+    title: str
+    genre: Optional[str] = None
+    duration: Optional[int] = None
+    poster_url: Optional[str] = None
+
+
+class InternalTicketResponse(BaseModel):
+    id: int
+    ticket_code: str
+    seat_number: str
+    status: str
+    created_at: datetime
+
+
+class InternalUserPurchaseResponse(BaseModel):
+    id: int
+    movie_id: int
+    movie: Optional[InternalMovieInfo]
+    quantity: int
+    total_amount: float
+    status: str
+    payment_info: Optional[Dict[str, Any]] = None
+    tickets: List[InternalTicketResponse]
+    created_at: datetime
+    show_date: Optional[date] = None
+    show_time: Optional[str] = None
+
+    @classmethod
+    def from_orm(cls, purchase):
+        movie_info = None
+        if purchase.movie:
+            movie_info = InternalMovieInfo(
+                id=purchase.movie.id,
+                title=purchase.movie.title,
+                genre=purchase.movie.genre,
+                duration=purchase.movie.duration,
+                poster_url=purchase.movie.poster_url,
+            )
+        return cls(
+            id=purchase.id,
+            movie_id=purchase.movie_id,
+            movie=movie_info,
+            quantity=purchase.quantity,
+            total_amount=purchase.total_amount,
+            status=purchase.status.value,
+            payment_info=purchase.payment_info,
+            tickets=[
+                InternalTicketResponse(
+                    id=t.id,
+                    ticket_code=t.ticket_code,
+                    seat_number=t.seat_number,
+                    status=t.status.value,
+                    created_at=t.created_at,
+                )
+                for t in purchase.tickets
+            ],
+            created_at=purchase.created_at,
+            show_date=purchase.show_date,
+            show_time=purchase.show_time,
+        )

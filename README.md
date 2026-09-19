@@ -29,6 +29,7 @@ FastAPI + SQLAlchemy 2.0 + Alembic, Postgres, `aiokafka`, `httpx`, puerto
 | `POST` | `/api/v1/purchases/tickets/{ticket_code}/validate` | Valida un boleto en sala (rol `admin`/`scanner`); detecta y anula boletos duplicados por doble venta |
 | `GET` | `/api/v1/purchases/showtimes/{id}/occupied-seats` | Asientos ocupados de una función, con fallback para datos históricos sin `showtime_id` |
 | `GET` | `/api/v1/purchases/internal/movies/{id}/used-ticket` | Interno, sin auth — usado por `catalog-service` para reseñas |
+| `GET` | `/api/v1/purchases/internal/users/{user_id}/purchases` | Interno, sin auth — usado por `user-service` para `GET /api/v1/users/me/purchases` (ver `../ARCHITECTURE.md`, "Aislamiento de base de datos por servicio") |
 | `GET` | `/health` | Estado del servicio + si el consumer de Kafka y el reconciler siguen vivos |
 
 ## Eventos Kafka

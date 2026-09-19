@@ -5,7 +5,7 @@ from datetime import datetime, date as date_type, time as time_type, timedelta
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.database import get_db
 from app.api.dependencies import get_current_user
@@ -13,7 +13,13 @@ from app.kafka.producer import publish_event
 from app.models.movie import Movie
 from app.models.purchase import Purchase, PurchaseStatus, Ticket, TicketStatus
 from app.models.user import User
-from app.schemas.purchase import PurchaseCreate, PurchaseResponse, PurchaseListResponse, TicketResponse
+from app.schemas.purchase import (
+    PurchaseCreate,
+    PurchaseResponse,
+    PurchaseListResponse,
+    TicketResponse,
+    InternalUserPurchaseResponse,
+)
 from app.services.booking import create_purchase as svc_create_purchase, call_refund_service
 
 logger = logging.getLogger(__name__)
@@ -210,6 +216,34 @@ async def check_user_used_ticket(
         "has_used_ticket": has_used,
         "first_name": user.first_name if user else None,
     }
+
+
+@router.get("/internal/users/{user_id}/purchases", response_model=List[InternalUserPurchaseResponse])
+async def get_user_purchases_internal(
+    user_id: int,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+    purchase_status: str = Query(default=None, alias="status"),
+    db: Session = Depends(get_db),
+):
+    """
+    Endpoint interno para user-service (GET /api/v1/users/me/purchases).
+    user-service ya validó el JWT y filtra por su propio user_id — no
+    requiere autenticación aquí, debe protegerse a nivel de red
+    (Traefik/VPC), igual que /internal/movies/{movie_id}/used-ticket.
+    Reemplaza la lectura directa que user-service hacía antes contra
+    cinema_booking (ver ARCHITECTURE.md, "Aislamiento de base de datos
+    por servicio").
+    """
+    q = (
+        db.query(Purchase)
+        .options(selectinload(Purchase.tickets), selectinload(Purchase.movie))
+        .filter(Purchase.user_id == user_id)
+    )
+    if purchase_status:
+        q = q.filter(Purchase.status == purchase_status)
+    purchases = q.order_by(Purchase.id.desc()).offset(skip).limit(limit).all()
+    return [InternalUserPurchaseResponse.from_orm(p) for p in purchases]
 
 
 @router.get("/showtimes/{showtime_id}/occupied-seats")
