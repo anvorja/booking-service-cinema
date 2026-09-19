@@ -880,6 +880,34 @@ async def reconcile_pending_purchases(db_factory) -> None:
                 await trigger_payment_for_order(db_factory, purchase.id)
                 continue
 
+        # payment.initiated se publicó bien pero nunca llegó payment.success/failed
+        # — típicamente porque payment-service estaba dormido (free tier de Render,
+        # solo despierta con tráfico HTTP directo, no con mensajes de Kafka
+        # esperando) y se perdió sin dejar rastro. Antes esto no se reintentaba
+        # nunca: la única salida era el catch-all de PAYMENT_FLOW_STALE_SECONDS
+        # (15 min) mucho más tarde de que el frontend ya se hubiera rendido (3 min,
+        # ver BookingProvider.tsx). Reintentar re-publica el mismo payment_request
+        # guardado — si para entonces payment-service ya despertó, esta vez sí
+        # procesa el mensaje.
+        if state == "awaiting_payment_result":
+            if attempts >= settings.PAYMENT_MAX_INIT_ATTEMPTS:
+                await mark_purchase_cancelled(
+                    db_factory,
+                    order_id=purchase.id,
+                    reason="No se recibió respuesta del pago tras varios intentos.",
+                    release_inventory=True,
+                )
+                continue
+
+            if last_attempt_at is None or last_attempt_at < retry_before:
+                logger.info(
+                    "Reconciler: sin respuesta a payment.initiated — reintentando | order_id=%s | attempt=%s",
+                    purchase.id,
+                    attempts + 1,
+                )
+                await trigger_payment_for_order(db_factory, purchase.id)
+                continue
+
         if created_at_utc < stale_before:
             await mark_purchase_cancelled(
                 db_factory,

@@ -24,7 +24,14 @@ class Settings(BaseSettings):
     CATALOG_SERVICE_URL: str = "http://catalog-service:8006"
     PAYMENT_RETRY_INTERVAL_SECONDS: int = 30
     PAYMENT_MAX_INIT_ATTEMPTS: int = 3
-    PAYMENT_FLOW_STALE_SECONDS: int = 15 * 60
+    # Catch-all final para cualquier estado que ninguna otra rama del
+    # reconciliador resuelva antes. Antes eran 15 min — muy por encima de los
+    # 3 min que el frontend espera (_pollUntilConfirmed en BookingProvider.tsx)
+    # antes de rendirse, dejando la compra en limbo mucho después de que el
+    # usuario ya vio un error. 4 min da margen sobre los ~90s que tardan los
+    # 3 reintentos de payment (ver rama awaiting_payment_result) más el
+    # timeout de inventario (2 min), sin acercarse a los 15 de antes.
+    PAYMENT_FLOW_STALE_SECONDS: int = 4 * 60
     INVENTORY_DECISION_TIMEOUT_SECONDS: int = 2 * 60
 
     # Redis — shared blacklist with auth-service (key: blacklist:<sha256>)
