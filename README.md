@@ -100,6 +100,18 @@ completa de restauración/migración de la BD:
 - **HTTP** → `payment-service` (solo reembolsos; la iniciación del pago va por Kafka), `catalog-service` (validar showtime al crear la compra)
 - **Kafka** → `inventory-service` (reserva/libera stock), `payment-service` (inicia/resuelve el cobro), `catalog-service` y `notification-service` (reaccionan a `purchase.confirmed`/`order.refunded`), `admin-service`/`auth-service` (sincronizan `movies`/`users` locales)
 
+> **Si `POST /api/v1/purchases` empieza a fallar la validación de showtime
+> para funciones que deberían existir**, no es un problema de este servicio
+> ni de sus migraciones: `cinema_booking` puede estar perfectamente al día
+> en Alembic y el fallo seguir ocurriendo porque `movie_showtimes` (en
+> `cinema_catalog`, de donde lee `catalog-service`) tiene datos sembrados
+> con fechas fijas que ya vencieron. En producción esto se refresca solo en
+> cada renovación mensual de Railway (`db_asuntos/scripts/02_restore_target.sh`
+> / `03_seed_only.sh` ya invocan `generate_showtimes.py` al final); si el
+> problema aparece entre renovaciones, ver
+> `../db_asuntos/docDBcambios.md` (Parte 7) y
+> `../db_asuntos/db_cinema_seeds/generate_showtimes_readme.md`.
+
 ## Correr en local
 
 ```bash
