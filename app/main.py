@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.core.config import settings
 from app.kafka.producer import start_producer, stop_producer
@@ -112,6 +113,9 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Booking Service", lifespan=lifespan)
+
+# Métricas de Prometheus (latencia/conteo por endpoint) en /metrics
+Instrumentator().instrument(app).expose(app)
 
 app.add_middleware(
     CORSMiddleware,
