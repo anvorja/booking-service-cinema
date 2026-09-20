@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     KAFKA_BOOTSTRAP_SERVERS: str = ""
     KAFKA_API_KEY: str = ""
     KAFKA_API_SECRET: str = ""
+    # Default = el group_id histórico de producción — no requiere ninguna
+    # variable nueva en Render. Local sobreescribe esto en su propio .env
+    # con un sufijo (ej. "-local") para no competir por particiones con
+    # producción: dev y prod comparten el mismo cluster de Confluent Cloud,
+    # y sin esto ambos entornos quedaban en el MISMO grupo de consumidores
+    # — un docker-compose local le podía robar particiones a producción.
+    KAFKA_GROUP_ID: str = "booking-service-group"
 
     # payment-service URL
     PAYMENT_SERVICE_URL: str = "http://payment-service:8003"

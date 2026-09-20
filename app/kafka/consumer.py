@@ -271,7 +271,7 @@ async def _run_consumer(db_factory) -> None:
         sasl_plain_username=settings.KAFKA_API_KEY,
         sasl_plain_password=settings.KAFKA_API_SECRET,
         ssl_context=ssl_context,
-        group_id="booking-service-group",
+        group_id=settings.KAFKA_GROUP_ID,
         # "earliest" garantiza que si el consumer se reinicia antes de hacer commit
         # del offset (p.ej. durante un cold-start), no pierde mensajes ya publicados.
         # Todos los handlers son idempotentes, así que reprocesar es seguro.
