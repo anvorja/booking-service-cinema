@@ -116,7 +116,7 @@ async def cancel_purchase(
     """
     Cancelar y reembolsar una compra confirmada.
     Valida que la función no haya comenzado (o esté a menos de 30 min de comenzar).
-    Llama a payment-service para procesar el reembolso y restaura los tickets disponibles.
+    Pide a payment-service devolver el dinero (Wompi) y restaura los tickets disponibles.
     """
     purchase = (
         db.query(Purchase)
@@ -152,10 +152,17 @@ async def cancel_purchase(
             except (ValueError, AttributeError):
                 pass  # si no se puede parsear la hora, permitir cancelación
 
-    # Procesar reembolso vía payment-service
+    # Devolver el dinero vía payment-service: Wompi anula las transacciones
+    # con tarjeta; otros medios (PSE, Nequi…) quedan para devolver desde el
+    # panel de Wompi (refund_status=manual_required).
     transaction_id = purchase.payment_info.get("transaction_id") if purchase.payment_info else None
-    if transaction_id:
-        await call_refund_service(transaction_id, float(purchase.total_amount))
+    refund = await call_refund_service(purchase.id)
+    payment_info = dict(purchase.payment_info or {})
+    payment_info.update(
+        refund_status=refund.get("refund_status"),
+        refund_detail=refund.get("detail"),
+    )
+    purchase.payment_info = payment_info
 
     # Restaurar tickets disponibles en la película
     movie = db.query(Movie).filter(Movie.id == purchase.movie_id).first()

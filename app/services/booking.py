@@ -20,7 +20,6 @@ from app.models.purchase import Purchase, Ticket, PurchaseStatus, TicketStatus
 from app.models.user import User
 from app.schemas.purchase import PurchaseCreate
 
-_PENDING_PAYMENT_TTL_SECONDS = 15 * 60
 _PENDING_PAYMENT_PREFIX = "booking:pending-payment:"
 # Debe quedar por debajo de PAYMENT_RETRY_INTERVAL_SECONDS pero con margen —
 # es la última defensa contra el reconciliador disparando dos intentos casi
@@ -279,7 +278,7 @@ async def create_purchase(db: Session, user_id: int, purchase_data: PurchaseCrea
     else:
         _tmp_order_id = None
 
-    stored_payment_info = _build_pending_payment_info(purchase_data)
+    stored_payment_info = _build_pending_payment_info()
 
     # Resolve show_date/show_time/theater: prefer showtime entity values over free-form fields
     resolved_show_date = purchase_data.show_date
@@ -403,19 +402,11 @@ def _build_ticket_preview(
     return tickets
 
 
-def _build_pending_payment_info(purchase_data: PurchaseCreate) -> dict[str, Any]:
-    if purchase_data.pse_info:
-        return {
-            "payment_method": "pse",
-            "bank_name": purchase_data.pse_info.bank_name,
-            "payer_email": purchase_data.pse_info.payer_email,
-            "status": "pending_inventory",
-        }
-
+def _build_pending_payment_info() -> dict[str, Any]:
+    # La persona elige el medio (tarjeta, PSE, Nequi…) dentro de Wompi: aquí
+    # nunca llegan datos de pago.
     return {
-        "payment_method": "card",
-        "last_four": purchase_data.payment_info.card_number[-4:],
-        "card_holder": purchase_data.payment_info.card_holder,
+        "payment_method": "wompi",
         "status": "pending_inventory",
     }
 
@@ -442,30 +433,7 @@ def _store_pending_payment_context(
             detail="Redis no disponible para guardar el contexto del pago.",
         )
 
-    if purchase_data.pse_info:
-        payment_request = {
-            "flow": "pse",
-            "payload": {
-                "bank_code": purchase_data.pse_info.bank_code,
-                "bank_name": purchase_data.pse_info.bank_name,
-                "document_type": purchase_data.pse_info.document_type,
-                "document_number": purchase_data.pse_info.document_number,
-                "payer_email": purchase_data.pse_info.payer_email,
-                "amount": total_amount,
-            },
-        }
-    else:
-        payment_request = {
-            "flow": "card",
-            "payload": {
-                "card_number": purchase_data.payment_info.card_number,
-                "card_holder": purchase_data.payment_info.card_holder,
-                "expiry_month": purchase_data.payment_info.expiry_month,
-                "expiry_year": purchase_data.payment_info.expiry_year,
-                "cvv": purchase_data.payment_info.cvv,
-                "amount": total_amount,
-            },
-        }
+    payment_request = {"flow": "wompi", "payload": {"amount": total_amount}}
 
     context = {
         "state": "awaiting_inventory",
@@ -499,7 +467,7 @@ def _store_pending_payment_context(
             "tickets": preview_tickets,
         },
     }
-    client.setex(_pending_payment_key(order_id), _PENDING_PAYMENT_TTL_SECONDS, json.dumps(context))
+    client.setex(_pending_payment_key(order_id), settings.pending_context_ttl_seconds, json.dumps(context))
 
 
 def _load_pending_payment_context(order_id: int) -> dict[str, Any] | None:
@@ -515,7 +483,7 @@ def _save_pending_payment_context(order_id: int, context: dict[str, Any]) -> Non
     if client is None:
         return
     context["updated_at"] = _utcnow_iso()
-    client.setex(_pending_payment_key(order_id), _PENDING_PAYMENT_TTL_SECONDS, json.dumps(context))
+    client.setex(_pending_payment_key(order_id), settings.pending_context_ttl_seconds, json.dumps(context))
 
 
 def _update_pending_payment_context(order_id: int, **updates: Any) -> dict[str, Any] | None:
@@ -563,12 +531,18 @@ async def trigger_payment_for_order(db_factory, order_id: int) -> None:
         return
 
     next_attempt = attempts + 1
+    # El enlace de Wompi vence a la misma hora en todos los reintentos: el
+    # cobro es uno solo (payment-service lo reutiliza por order_id).
+    expires_at = context.get("payment_expires_at") or (
+        _utcnow() + timedelta(seconds=settings.PAYMENT_CHECKOUT_TTL_SECONDS)
+    ).isoformat()
     _update_pending_payment_context(
         order_id,
         state="payment_initiated",
         attempts=next_attempt,
         last_attempt_at=_utcnow_iso(),
         last_error=None,
+        payment_expires_at=expires_at,
     )
 
     with db_factory() as db:
@@ -579,6 +553,7 @@ async def trigger_payment_for_order(db_factory, order_id: int) -> None:
                 purchase,
                 "payment_initiated",
                 payment_attempts=next_attempt,
+                payment_expires_at=expires_at,
             )
             db.commit()
 
@@ -586,6 +561,7 @@ async def trigger_payment_for_order(db_factory, order_id: int) -> None:
     event = {
         "flow": payment_request["flow"],
         **payment_request["payload"],
+        "expires_at": expires_at,
         "order_context": context["event_context"],
     }
 
@@ -675,7 +651,19 @@ async def confirm_purchase_from_payment(db_factory, payload: dict[str, Any]) -> 
             logger.info("payment.success duplicado ignorado | order_id=%s", order_id)
             return
         if purchase.status != PurchaseStatus.PENDING:
+            # La persona pagó una compra que ya se canceló (p. ej. el pago
+            # llegó después del margen de espera): se le devuelve el dinero.
             logger.warning("payment.success fuera de secuencia | order_id=%s status=%s", order_id, purchase.status.value)
+            late = True
+        else:
+            late = False
+    if late:
+        await refund_uncollectable_payment(order_id, "El pago llegó cuando la compra ya estaba cancelada.")
+        return
+
+    with db_factory() as db:
+        purchase = db.query(Purchase).filter(Purchase.id == order_id).first()
+        if not purchase or purchase.status != PurchaseStatus.PENDING:
             return
 
         # Guard against double-booking: check for already-confirmed tickets on the same seats.
@@ -721,6 +709,7 @@ async def confirm_purchase_from_payment(db_factory, payload: dict[str, Any]) -> 
                     reason=f"El asiento {conflict.seat_number} ya fue vendido a otra persona.",
                     release_inventory=True,
                 )
+                await refund_uncollectable_payment(order_id, "Doble venta del asiento: se devuelve el pago.")
                 return
 
         existing_codes = {ticket.ticket_code for ticket in purchase.tickets}
@@ -748,6 +737,8 @@ async def confirm_purchase_from_payment(db_factory, payload: dict[str, Any]) -> 
             purchase,
             "approved",
             transaction_id=payload.get("transaction_id"),
+            payment_reference=payload.get("payment_reference"),
+            payment_method_type=payload.get("payment_method_type"),
             last_four=payload.get("payment_last_four", "****"),
             payment_attempts=(purchase.payment_info or {}).get("payment_attempts"),
         )
@@ -892,24 +883,35 @@ async def reconcile_pending_purchases(db_factory) -> None:
         # ver BookingProvider.tsx). Reintentar re-publica el mismo payment_request
         # guardado — si para entonces payment-service ya despertó, esta vez sí
         # procesa el mensaje.
+        #
+        # Con Wompi, "sin respuesta" es lo normal mientras la persona paga en el
+        # Web Checkout: se espera hasta que venza el enlace más el margen para
+        # resultados tardíos. Re-publicar es inofensivo (payment-service
+        # reutiliza el cobro por order_id) y cubre un payment-service dormido.
         if state == "awaiting_payment_result":
-            if attempts >= settings.PAYMENT_MAX_INIT_ATTEMPTS:
+            payment_expires_at = _parse_iso_datetime(context.get("payment_expires_at"))
+            deadline = (payment_expires_at or created_at_utc) + timedelta(
+                seconds=settings.PAYMENT_RESULT_GRACE_SECONDS
+            )
+            if now >= deadline:
                 await mark_purchase_cancelled(
                     db_factory,
                     order_id=purchase.id,
-                    reason="No se recibió respuesta del pago tras varios intentos.",
+                    reason="El pago no se completó a tiempo en Wompi.",
                     release_inventory=True,
                 )
                 continue
 
-            if last_attempt_at is None or last_attempt_at < retry_before:
+            if attempts < settings.PAYMENT_MAX_INIT_ATTEMPTS and (
+                last_attempt_at is None or last_attempt_at < retry_before
+            ):
                 logger.info(
-                    "Reconciler: sin respuesta a payment.initiated — reintentando | order_id=%s | attempt=%s",
+                    "Reconciler: re-publicando payment.initiated (idempotente) | order_id=%s | attempt=%s",
                     purchase.id,
                     attempts + 1,
                 )
                 await trigger_payment_for_order(db_factory, purchase.id)
-                continue
+            continue
 
         if created_at_utc < stale_before:
             await mark_purchase_cancelled(
@@ -920,10 +922,13 @@ async def reconcile_pending_purchases(db_factory) -> None:
             )
 
 
-async def call_refund_service(transaction_id: str, amount: float) -> dict:
+async def call_refund_service(order_id: int) -> dict:
     """
-    Llama a payment-service para procesar el reembolso de una transacción.
-    Si el servicio falla, lanza HTTPException para que el cancelar se aborte.
+    Pide a payment-service devolver el dinero de una compra (ruta interna,
+    X-Internal-Token). Responde refund_status: "voided" (Wompi anuló la
+    transacción con tarjeta), "manual_required" (otro medio: se devuelve desde
+    el panel de Wompi) o null (no hubo cobro). Si el servicio falla, lanza
+    HTTPException para que la cancelación se aborte.
     """
     if circuit_breaker.is_open():
         raise HTTPException(
@@ -931,12 +936,12 @@ async def call_refund_service(transaction_id: str, amount: float) -> dict:
             detail="Servicio de reembolsos no disponible temporalmente. Intenta de nuevo en unos minutos.",
         )
 
-    payload = {"transaction_id": transaction_id, "amount": amount}
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
-                f"{settings.PAYMENT_SERVICE_URL}/payments/refund",
-                json=payload,
+                f"{settings.PAYMENT_SERVICE_URL}/internal/refunds",
+                json={"order_id": order_id},
+                headers={"X-Internal-Token": settings.INTERNAL_SERVICE_TOKEN},
             )
         resp.raise_for_status()
         circuit_breaker.record_success()
@@ -955,4 +960,23 @@ async def call_refund_service(transaction_id: str, amount: float) -> dict:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Servicio de reembolsos no disponible. Intenta de nuevo en unos minutos.",
+        )
+
+
+async def refund_uncollectable_payment(order_id: int, reason: str) -> None:
+    """
+    Un pago aprobado para una compra que no se puede entregar: se devuelve.
+    Best effort desde un consumer de Kafka — si falla queda en el log para
+    devolverlo a mano desde el panel de Wompi.
+    """
+    try:
+        result = await call_refund_service(order_id)
+        logger.warning(
+            "Pago devuelto | order_id=%s | motivo=%s | refund_status=%s | ref=%s",
+            order_id, reason, result.get("refund_status"), result.get("reference"),
+        )
+    except HTTPException as exc:
+        logger.error(
+            "NO se pudo devolver el pago — revisar en Wompi | order_id=%s | motivo=%s | error=%s",
+            order_id, reason, exc.detail,
         )
