@@ -9,6 +9,7 @@ from typing import Any, List
 
 import httpx
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -16,9 +17,10 @@ from app.core import redis_client, circuit_breaker
 from app.core.redis_client import hold_seat, release_seat, reassign_hold, release_seats_for_order, inventory_was_reserved
 from app.kafka.producer import publish_event as _publish_kafka_event
 from app.models.movie import Movie
-from app.models.purchase import Purchase, Ticket, PurchaseStatus, TicketStatus
+from app.models.purchase import Purchase, PurchaseLine, PurchaseLineKind, Ticket, PurchaseStatus, TicketStatus
 from app.models.user import User
 from app.schemas.purchase import PurchaseCreate
+from app.services.pricing import quote_for
 
 _PENDING_PAYMENT_PREFIX = "booking:pending-payment:"
 # Debe quedar por debajo de PAYMENT_RETRY_INTERVAL_SECONDS pero con margen —
@@ -251,7 +253,16 @@ async def create_purchase(db: Session, user_id: int, purchase_data: PurchaseCrea
             detail=f"Only {movie.available_tickets} tickets available",
         )
 
-    total_amount = movie.price * purchase_data.quantity
+    # El total lo decide el backend (boletas General/Preferencial + comida +
+    # valor por servicio); el frontend nunca envía montos.
+    quote = quote_for(
+        db,
+        movie_price=movie.price,
+        quantity=purchase_data.quantity,
+        selected_seats=purchase_data.selected_seats,
+        selection=purchase_data.concession_selection,
+    )
+    total_amount = float(quote.total)
 
     user = db.query(User).filter(User.id == user_id, User.is_active == True).first()
     if not user:
@@ -310,6 +321,17 @@ async def create_purchase(db: Session, user_id: int, purchase_data: PurchaseCrea
             show_date=resolved_show_date,
             show_time=resolved_show_time,
             showtime_id=effective_showtime_id,
+            lines=[
+                PurchaseLine(
+                    kind=PurchaseLineKind(line.kind),
+                    code=line.code,
+                    description=line.description,
+                    unit_price=line.unit_price,
+                    quantity=line.quantity,
+                    line_total=line.line_total,
+                )
+                for line in quote.lines
+            ],
         )
         db.add(purchase)
         db.flush()
@@ -744,7 +766,27 @@ async def confirm_purchase_from_payment(db_factory, payload: dict[str, Any]) -> 
         )
         purchase.status = PurchaseStatus.CONFIRMED
         showtime_id_for_release = purchase.showtime_id
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError as exc:
+            # Última barrera (ix_ticket_showtime_seat): otra compra ya tiene la
+            # silla. La persona pagó: se cancela y se le devuelve el dinero, en
+            # vez de dejar la compra pendiente con el cobro hecho.
+            db.rollback()
+            logger.error("DOBLE VENTA al emitir tickets | order_id=%s | %s", order_id, exc.orig)
+            conflict_on_insert = True
+        else:
+            conflict_on_insert = False
+
+    if conflict_on_insert:
+        await mark_purchase_cancelled(
+            db_factory,
+            order_id=order_id,
+            reason="Una de tus sillas ya fue vendida a otra persona. Te devolvemos el pago.",
+            release_inventory=True,
+        )
+        await refund_uncollectable_payment(order_id, "Doble venta al emitir los tickets.")
+        return
 
     # Liberar holds Redis tras confirmar los tickets en DB
     if showtime_id_for_release and created_seats:
@@ -900,6 +942,9 @@ async def reconcile_pending_purchases(db_factory) -> None:
                     reason="El pago no se completó a tiempo en Wompi.",
                     release_inventory=True,
                 )
+                # Si el pago sí se aprobó y el evento se perdió, se devuelve;
+                # si nunca se cobró, payment-service responde que no hay nada.
+                await refund_uncollectable_payment(purchase.id, "Compra cancelada por vencimiento.")
                 continue
 
             if attempts < settings.PAYMENT_MAX_INIT_ATTEMPTS and (
@@ -971,10 +1016,13 @@ async def refund_uncollectable_payment(order_id: int, reason: str) -> None:
     """
     try:
         result = await call_refund_service(order_id)
-        logger.warning(
-            "Pago devuelto | order_id=%s | motivo=%s | refund_status=%s | ref=%s",
-            order_id, reason, result.get("refund_status"), result.get("reference"),
-        )
+        if result.get("refund_status") is None:
+            logger.info("Sin cobro que devolver | order_id=%s | motivo=%s", order_id, reason)
+        else:
+            logger.warning(
+                "Pago devuelto | order_id=%s | motivo=%s | refund_status=%s | ref=%s",
+                order_id, reason, result.get("refund_status"), result.get("reference"),
+            )
     except HTTPException as exc:
         logger.error(
             "NO se pudo devolver el pago — revisar en Wompi | order_id=%s | motivo=%s | error=%s",

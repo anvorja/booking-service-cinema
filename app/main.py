@@ -57,7 +57,7 @@ async def lifespan(_app: FastAPI):
         _conn.execute(_text(
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_ticket_showtime_seat "
             "ON tickets (showtime_id, seat_number) "
-            "WHERE showtime_id IS NOT NULL"
+            "WHERE showtime_id IS NOT NULL AND status <> 'CANCELLED'"
         ))
         _conn.commit()
 

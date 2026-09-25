@@ -72,6 +72,35 @@ verifica si `inventory-service` ya reservó stock sin que el evento llegara,
 o cancela liberando lo que corresponda tras `PAYMENT_FLOW_STALE_SECONDS` /
 `INVENTORY_DECISION_TIMEOUT_SECONDS`.
 
+### Precios: los calcula el backend
+
+El frontend nunca envía montos: solo asientos y productos
+(`concessions: [{code, quantity}]`). booking arma el total en
+`app/services/pricing.py` y ese es el monto que se cobra en Wompi.
+
+| Concepto | Precio |
+|---|---|
+| Boleta General | `movie.price` (lo gestiona el admin por película) |
+| Boleta Preferencial | `movie.price` + `PREFERENTIAL_SURCHARGE`; es preferencial la silla cuya fila está en `PREFERENTIAL_ROWS` |
+| Comida | Tabla `concession_items` (sembrada por la migración `b7c1d2e3f4a5` con el menú de confitería, sushi, Cinepolitana y Juan Valdez) |
+| Valor por servicio | `CONCESSION_SERVICE_FEE`, una vez, si la compra incluye comida |
+
+Cada compra guarda su desglose en `purchase_lines` con los precios del
+momento (si luego cambia un precio, la compra no cambia); `total_amount` es
+su suma.
+
+| Método | Ruta | Uso |
+|---|---|---|
+| `GET` | `/api/v1/purchases/pricing?movie_id=` | Precios de boletas, filas preferenciales, menú y valor por servicio (público) |
+| `POST` | `/api/v1/purchases/quote` | Desglose y total exactos de una compra antes de crearla (mismo cuerpo que `POST /purchases`; no reserva nada) |
+
+`GET /api/v1/purchases/{id}` devuelve también `lines`.
+
+**Sillas reembolsadas:** el índice único `ix_ticket_showtime_seat` ignora los
+tickets `CANCELLED` (migración `c8d2e3f4a5b6`), así que una silla reembolsada
+vuelve a venderse. Si aun así el insert choca, la compra se cancela y se
+devuelve el pago; lo mismo si el reconciliador la cancela por vencimiento.
+
 ### Pago con Wompi
 
 La compra ya no recibe datos de tarjeta ni PSE: la persona paga en el Web
