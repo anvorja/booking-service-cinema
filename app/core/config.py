@@ -62,6 +62,19 @@ class Settings(BaseSettings):
     # transacción que empezó a tiempo, p. ej. un PSE lento) antes de cancelar.
     PAYMENT_RESULT_GRACE_SECONDS: int = Field(default=15 * 60, ge=0)
 
+    # ── Precios (el backend es la única fuente del total que se cobra) ──
+    # General = precio de la película (movie.price, lo gestiona el admin);
+    # Preferencial = ese precio + este recargo (pesos).
+    PREFERENTIAL_SURCHARGE: int = Field(default=5_700, ge=0)
+    # Filas de sillas preferenciales, separadas por coma.
+    PREFERENTIAL_ROWS: str = "K,L,M,N,O,P"
+    # Valor por servicio que se suma cuando la compra incluye comida.
+    CONCESSION_SERVICE_FEE: int = Field(default=4_800, ge=0)
+
+    @property
+    def preferential_rows(self) -> frozenset[str]:
+        return frozenset(r.strip().upper() for r in self.PREFERENTIAL_ROWS.split(",") if r.strip())
+
     @property
     def seat_hold_ttl_seconds(self) -> int:
         """Los asientos se retienen mientras se decide el inventario y se paga (+2 min de margen)."""

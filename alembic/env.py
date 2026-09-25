@@ -19,7 +19,8 @@ from app.core.config import settings          # noqa: E402  — DATABASE_URL aqu
 from app.models.base import Base              # noqa: E402  — DeclarativeBase
 import app.models.user                        # noqa: E402,F401 — registrar tabla users
 import app.models.movie                       # noqa: E402,F401 — registrar tabla movies
-import app.models.purchase                    # noqa: E402,F401 — registrar tablas purchases + tickets
+import app.models.purchase                    # noqa: E402,F401 — registrar tablas purchases + tickets + purchase_lines
+import app.models.concession                  # noqa: E402,F401 — registrar tabla concession_items
 
 # ── Alembic Config object ────────────────────────────────────────────────────
 config = context.config

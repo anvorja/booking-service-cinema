@@ -10,12 +10,18 @@ from sqlalchemy.orm import Session, selectinload, joinedload
 from app.core.database import get_db
 from app.api.dependencies import get_current_user, verify_internal_token
 from app.kafka.producer import publish_event
+from app.core.config import settings
+from app.models.concession import ConcessionItem
 from app.models.movie import Movie
 from app.models.purchase import Purchase, PurchaseStatus, Ticket, TicketStatus
 from app.models.user import User
 from app.schemas.purchase import (
+    ConcessionItemResponse,
+    PriceLineResponse,
+    PricingResponse,
     PurchaseCreate,
     PurchaseResponse,
+    QuoteResponse,
     PurchaseListResponse,
     TicketResponse,
     InternalUserPurchaseResponse,
@@ -25,6 +31,7 @@ from app.schemas.purchase import (
     DateSalesReport,
 )
 from app.services.booking import create_purchase as svc_create_purchase, call_refund_service
+from app.services.pricing import quote_for, ticket_prices
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +95,67 @@ async def get_my_purchases(
         .all()
     )
     return [PurchaseListResponse.from_orm(p) for p in purchases]
+
+
+def _movie_or_404(db: Session, movie_id: int) -> Movie:
+    movie = db.query(Movie).filter(Movie.id == movie_id, Movie.is_active == True).first()  # noqa: E712
+    if not movie:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Movie not found or not available")
+    return movie
+
+
+@router.get("/pricing", response_model=PricingResponse)
+async def get_pricing(movie_id: int = Query(..., gt=0), db: Session = Depends(get_db)):
+    """
+    Precios para mostrar en la compra: boleta General (precio de la película),
+    Preferencial (+ recargo), filas preferenciales, menú de comida y valor por
+    servicio. Público. Son los mismos con que se calcula el cobro.
+    """
+    movie = _movie_or_404(db, movie_id)
+    items = (
+        db.query(ConcessionItem)
+        .filter(ConcessionItem.is_active == True)  # noqa: E712
+        .order_by(ConcessionItem.sort_order, ConcessionItem.id)
+        .all()
+    )
+    return PricingResponse(
+        movie_id=movie.id,
+        ticket_prices=ticket_prices(movie.price, settings.PREFERENTIAL_SURCHARGE),
+        preferential_rows=sorted(settings.preferential_rows),
+        service_fee_with_concessions=settings.CONCESSION_SERVICE_FEE,
+        concessions=[
+            ConcessionItemResponse(
+                code=i.code, category=i.category, name=i.name, description=i.description, price=i.price
+            )
+            for i in items
+        ],
+    )
+
+
+@router.post("/quote", response_model=QuoteResponse)
+async def quote_purchase(purchase_data: PurchaseCreate, db: Session = Depends(get_db)):
+    """
+    Desglose y total exactos de una compra antes de crearla (mismo cálculo que
+    POST /purchases). No reserva nada.
+    """
+    movie = _movie_or_404(db, purchase_data.movie_id)
+    quote = quote_for(
+        db,
+        movie_price=movie.price,
+        quantity=purchase_data.quantity,
+        selected_seats=purchase_data.selected_seats,
+        selection=purchase_data.concession_selection,
+    )
+    return QuoteResponse(
+        lines=[
+            PriceLineResponse(
+                kind=l.kind, code=l.code, description=l.description,
+                unit_price=l.unit_price, quantity=l.quantity, line_total=l.line_total,
+            )
+            for l in quote.lines
+        ],
+        total=quote.total,
+    )
 
 
 @router.get("/{purchase_id}", response_model=PurchaseResponse)

@@ -7,13 +7,21 @@ from pydantic import BaseModel, Field, model_validator
 _SEAT_CODE_RE = re.compile(r"^[A-Z]\d{1,3}$")
 
 
+class ConcessionSelection(BaseModel):
+    code: str = Field(..., min_length=1, max_length=20)
+    quantity: int = Field(..., ge=1, le=20)
+
+
 class PurchaseCreate(BaseModel):
     """
-    Sin datos de pago: la persona paga en el Web Checkout de Wompi (tarjeta,
-    PSE, Nequi…) y los datos nunca pasan por nuestros servicios.
+    Sin datos de pago ni montos: la persona paga en el Web Checkout de Wompi
+    (tarjeta, PSE, Nequi…) y el total lo calcula el backend a partir de los
+    asientos y los productos (ver app/services/pricing.py).
     """
     movie_id: int = Field(..., gt=0)
     quantity: int = Field(..., ge=1, le=10)
+    # Comida que se compra con las boletas (códigos del menú de GET /pricing).
+    concessions: List[ConcessionSelection] = Field(default_factory=list, max_length=30)
     show_date: Optional[date] = None
     show_time: Optional[str] = Field(None, pattern=r"^([0-1]?\d|2[0-3]):[0-5]\d$")
     showtime_id: Optional[int] = Field(None, gt=0)
@@ -39,7 +47,48 @@ class PurchaseCreate(BaseModel):
             if len(set(self.selected_seats)) != len(self.selected_seats):
                 raise ValueError('No se pueden seleccionar asientos duplicados.')
 
+        codes = [c.code for c in self.concessions]
+        if len(set(codes)) != len(codes):
+            raise ValueError('Cada producto va una sola vez, con su cantidad.')
+
         return self
+
+    @property
+    def concession_selection(self) -> Dict[str, int]:
+        return {c.code: c.quantity for c in self.concessions}
+
+
+class PriceLineResponse(BaseModel):
+    kind: str          # ticket | concession | service_fee
+    code: str
+    description: str
+    unit_price: int
+    quantity: int
+    line_total: int
+
+
+class QuoteResponse(BaseModel):
+    lines: List[PriceLineResponse]
+    total: int
+    currency: str = "COP"
+
+
+class ConcessionItemResponse(BaseModel):
+    code: str
+    category: str
+    name: str
+    description: str
+    price: int
+
+
+class PricingResponse(BaseModel):
+    """Lo que la UI necesita para mostrar precios: todos salen del backend."""
+    movie_id: int
+    ticket_prices: Dict[str, int]          # {"general": …, "preferential": …}
+    preferential_rows: List[str]
+    service_fee_with_concessions: int
+    concessions: List[ConcessionItemResponse]
+    currency: str = "COP"
 
 
 class TicketResponse(BaseModel):
@@ -96,6 +145,8 @@ class PurchaseResponse(BaseModel):
     movie_title: str
     user_full_name: str
     tickets: List[TicketResponse]
+    # Desglose del total (boletas, comida, valor por servicio).
+    lines: List[PriceLineResponse] = Field(default_factory=list)
     payment_summary: Dict[str, Any]
     show_date: Optional[date] = None
     show_time: Optional[str] = None
@@ -115,6 +166,13 @@ class PurchaseResponse(BaseModel):
             movie_title=purchase.movie.title,
             user_full_name=purchase.user.full_name,
             tickets=[TicketResponse.from_orm(t) for t in purchase.tickets],
+            lines=[
+                PriceLineResponse(
+                    kind=line.kind.value, code=line.code, description=line.description,
+                    unit_price=line.unit_price, quantity=line.quantity, line_total=line.line_total,
+                )
+                for line in purchase.lines
+            ],
             payment_summary=_payment_summary(purchase),
             show_date=purchase.show_date,
             show_time=purchase.show_time,
