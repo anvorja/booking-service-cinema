@@ -275,6 +275,24 @@ async def create_purchase(db: Session, user_id: int, purchase_data: PurchaseCrea
     # quede persistido si los holds fallan. Usamos un order_id temporal basado en user+time
     # y luego los confirmamos con el order_id real tras el flush.
     if purchase_data.selected_seats and effective_showtime_id:
+        # Las sillas ya vendidas (tickets ACTIVE/USED de esta función) se
+        # rechazan aquí, antes de cobrar: el mapa de catalog y los holds de
+        # Redis no saben qué se vendió, y sin esto la persona pagaba una silla
+        # ocupada y luego había que reembolsarle.
+        sold = sorted(
+            seat for (seat,) in db.query(Ticket.seat_number).filter(
+                Ticket.showtime_id == effective_showtime_id,
+                Ticket.seat_number.in_(purchase_data.selected_seats),
+                Ticket.status.in_([TicketStatus.ACTIVE, TicketStatus.USED]),
+            )
+        )
+        if sold:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"{'La silla' if len(sold) == 1 else 'Las sillas'} {', '.join(sold)} ya "
+                       f"{'está vendida. Elige otra' if len(sold) == 1 else 'están vendidas. Elige otras'}.",
+            )
+
         # Pre-validación: consultamos el mapa y adquirimos holds con order_id=0 (placeholder)
         # Los holds se reasignarán al order_id real si la DB confirma la compra.
         # Para atomicidad práctica usamos un ID temporal negativo que no puede chocar.
