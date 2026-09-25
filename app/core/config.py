@@ -1,4 +1,5 @@
 # app/core/config.py
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -53,6 +54,23 @@ class Settings(BaseSettings):
     # timeout de inventario (2 min) — muy por debajo de los 15 min de antes.
     PAYMENT_FLOW_STALE_SECONDS: int = 5 * 60
     INVENTORY_DECISION_TIMEOUT_SECONDS: int = 2 * 60
+    # Tiempo que tiene la persona para pagar en el Web Checkout de Wompi: es
+    # el expiration-time del enlace (Wompi no cobra después). Lo fija booking
+    # porque es quien retiene los asientos mientras tanto.
+    PAYMENT_CHECKOUT_TTL_SECONDS: int = Field(default=10 * 60, ge=5 * 60, le=60 * 60)
+    # Tras vencer el enlace, cuánto se espera un resultado tardío (una
+    # transacción que empezó a tiempo, p. ej. un PSE lento) antes de cancelar.
+    PAYMENT_RESULT_GRACE_SECONDS: int = Field(default=15 * 60, ge=0)
+
+    @property
+    def seat_hold_ttl_seconds(self) -> int:
+        """Los asientos se retienen mientras se decide el inventario y se paga (+2 min de margen)."""
+        return self.INVENTORY_DECISION_TIMEOUT_SECONDS + self.PAYMENT_CHECKOUT_TTL_SECONDS + 120
+
+    @property
+    def pending_context_ttl_seconds(self) -> int:
+        """El contexto de la compra vive hasta la última decisión del reconciliador (+5 min)."""
+        return self.seat_hold_ttl_seconds + self.PAYMENT_RESULT_GRACE_SECONDS + 300
 
     # Redis — shared blacklist with auth-service (key: blacklist:<sha256>)
     REDIS_URL: str = ""

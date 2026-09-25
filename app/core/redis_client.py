@@ -6,8 +6,6 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
-_SEAT_HOLD_TTL = 900  # 15 minutos
-
 _client = None
 
 
@@ -47,7 +45,7 @@ def is_blacklisted(token: str) -> bool:
         return False
 
 
-def hold_seat(showtime_id: int, seat_code: str, order_id: int, ttl: int = _SEAT_HOLD_TTL) -> bool:
+def hold_seat(showtime_id: int, seat_code: str, order_id: int, ttl: int | None = None) -> bool:
     """
     SETNX atómico para reservar temporalmente un asiento.
     Retorna True si el hold fue adquirido, False si ya estaba tomado por otro usuario.
@@ -59,7 +57,8 @@ def hold_seat(showtime_id: int, seat_code: str, order_id: int, ttl: int = _SEAT_
         return False
     try:
         key = f"seat:hold:{showtime_id}:{seat_code}"
-        result = client.set(key, str(order_id), ex=ttl, nx=True)
+        # Dura lo que dura pagar en Wompi (ver settings.seat_hold_ttl_seconds).
+        result = client.set(key, str(order_id), ex=ttl or settings.seat_hold_ttl_seconds, nx=True)
         return result is True
     except Exception as exc:
         logger.error("hold_seat error | showtime_id=%s seat=%s | %s", showtime_id, seat_code, exc)

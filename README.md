@@ -43,7 +43,7 @@ Detalle de payload y semántica de cada uno en
 
 **Publica:**
 - `order.created` — arranca la saga, al crear la compra
-- `payment.initiated` — dispara el cobro (con datos de tarjeta/PSE) tras `inventory.reserved`
+- `payment.initiated` — pide a payment-service el cobro en Wompi tras `inventory.reserved` (`flow=wompi`, monto y `expires_at`; sin datos de pago)
 - `purchase.confirmed` — solo si la compra se confirmó sin conflictos; dispara el email de confirmación
 - `inventory.release` — compensación cuando el pago falla
 - `order.refunded` — al cancelar una compra confirmada
@@ -57,8 +57,8 @@ sincronizada la copia local de `users`.
 
 ## Resiliencia de la saga
 
-El contexto de cada compra en curso (montos, tarjeta, snapshot de la
-película) vive en **Redis con TTL**, no solo en Postgres — es lo que le
+El contexto de cada compra en curso (montos, snapshot de la película,
+vencimiento del cobro) vive en **Redis con TTL**, no solo en Postgres — es lo que le
 permite a `trigger_payment_for_order` reintentar sin perder datos. Un
 **guard de vuelo** evita reiniciar un pago si el intento anterior es
 reciente. Todos los handlers son idempotentes por `order_id` (`ON CONFLICT`,
@@ -72,7 +72,29 @@ verifica si `inventory-service` ya reservó stock sin que el evento llegara,
 o cancela liberando lo que corresponda tras `PAYMENT_FLOW_STALE_SECONDS` /
 `INVENTORY_DECISION_TIMEOUT_SECONDS`.
 
-Las llamadas a `payment-service` para reembolsos pasan por un **circuit
+### Pago con Wompi
+
+La compra ya no recibe datos de tarjeta ni PSE: la persona paga en el Web
+Checkout de Wompi (ver `payment-service-cinema/README.md`).
+
+- Al iniciar el cobro, booking fija `payment_expires_at` = ahora +
+  `PAYMENT_CHECKOUT_TTL_SECONDS` (10 min por defecto): es el vencimiento del
+  enlace de Wompi. Los asientos quedan retenidos en Redis ese tiempo (más el de
+  la decisión de inventario), y el contexto de la compra hasta la última
+  decisión del reconciliador.
+- Mientras la compra está en `awaiting_payment_result`, el reconciliador **no
+  cancela**: la persona está pagando. Re-publica `payment.initiated` hasta
+  `PAYMENT_MAX_INIT_ATTEMPTS` veces (inofensivo: payment-service reutiliza el
+  cobro por `order_id`) y cancela solo cuando pasa `payment_expires_at` +
+  `PAYMENT_RESULT_GRACE_SECONDS` sin resultado.
+- Si llega `payment.success` para una compra ya cancelada (pago tardío) o el
+  asiento se vendió dos veces, booking pide el reembolso a payment-service.
+- `payment_summary` de `GET /api/v1/purchases/{id}` expone `status`,
+  `payment_expires_at`, `payment_reference` (`cinemaplus-…`),
+  `payment_method_type` y, tras cancelar, `refund_status`/`refund_detail`.
+
+Los reembolsos (`POST /internal/refunds` de payment-service, con
+`X-Internal-Token`) pasan por un **circuit
 breaker respaldado en Redis** (`app/core/circuit_breaker.py`): tras 3 fallos
 consecutivos abre por 60s y responde `503` sin intentar la llamada.
 
