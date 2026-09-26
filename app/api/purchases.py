@@ -149,10 +149,10 @@ async def quote_purchase(purchase_data: PurchaseCreate, db: Session = Depends(ge
     return QuoteResponse(
         lines=[
             PriceLineResponse(
-                kind=l.kind, code=l.code, description=l.description,
-                unit_price=l.unit_price, quantity=l.quantity, line_total=l.line_total,
+                kind=line.kind, code=line.code, description=line.description,
+                unit_price=line.unit_price, quantity=line.quantity, line_total=line.line_total,
             )
-            for l in quote.lines
+            for line in quote.lines
         ],
         total=quote.total,
     )

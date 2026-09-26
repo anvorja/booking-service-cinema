@@ -1,5 +1,5 @@
 # app/models/movie.py — refleja la tabla movies de cinema_catalog (fuente de verdad: catalog-service)
-from sqlalchemy import String, Integer, Float, Boolean
+from sqlalchemy import String, Integer, Float
 from sqlalchemy.orm import Mapped, mapped_column
 from typing import Optional
 from app.models.base import BaseModel

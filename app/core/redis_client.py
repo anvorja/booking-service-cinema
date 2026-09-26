@@ -1,7 +1,7 @@
 # app/core/redis_client.py — Redis client: blacklist check + seat holds
 import hashlib
 import logging
-from typing import List, Optional
+from typing import List
 from .config import settings
 
 logger = logging.getLogger(__name__)

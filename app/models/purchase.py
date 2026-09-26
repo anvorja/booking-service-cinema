@@ -1,10 +1,14 @@
 # app/models/purchase.py
 import enum
 from datetime import date as date_type
-from typing import List, Optional, Dict, Any
+from typing import TYPE_CHECKING, List, Optional, Dict, Any
 from sqlalchemy import CheckConstraint, String, Integer, Float, ForeignKey, JSON, Enum, Date, Index, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import BaseModel
+
+if TYPE_CHECKING:
+    from app.models.movie import Movie
+    from app.models.user import User
 
 
 class PurchaseStatus(str, enum.Enum):
