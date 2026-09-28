@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core import redis_client, circuit_breaker
-from app.core.redis_client import hold_seat, release_seat, reassign_hold, release_seats_for_order, inventory_was_reserved
+from app.core.redis_client import hold_seat, reassign_hold, release_seats_for_order, inventory_was_reserved
 from app.kafka.producer import publish_event as _publish_kafka_event
 from app.models.movie import Movie
 from app.models.purchase import Purchase, PurchaseLine, PurchaseLineKind, Ticket, PurchaseStatus, TicketStatus
